@@ -1638,6 +1638,33 @@ export function createDurableLLMExecutionStep(_options?: DurableLLMExecutionStep
                 });
               } catch (error) {
                 if (error instanceof TripWire) {
+                  const retryRequested = error.options?.retry === true;
+                  const canRetryProcessor =
+                    maxProcessorRetries !== undefined && processorRetryCount < maxProcessorRetries;
+                  const shouldRetryProcessor = retryRequested && canRetryProcessor;
+
+                  if (shouldRetryProcessor) {
+                    // Bounded processor retry, mirroring the regular agent's
+                    // llm-execution-step.ts: drop the rejected response message so
+                    // the LLM does not see it in the next prompt, add the processor
+                    // feedback, and re-run the model call. A processor retry should
+                    // NOT consume a model retry attempt.
+                    messageList.removeByIds([currentMessageId]);
+                    messageList.addSystem(
+                      `[Processor Feedback] Your previous response was not accepted: ${error.message}. Please try again with the feedback in mind.`,
+                      'processor-retry-feedback',
+                    );
+                    processorRetryCount++;
+                    attempt--;
+                    continue;
+                  }
+                  if (retryRequested && !canRetryProcessor) {
+                    logger?.warn?.(
+                      `Processor requested retry but maxProcessorRetries (${maxProcessorRetries}) exceeded. Current count: ${processorRetryCount}. Treating as abort.`,
+                      { runId },
+                    );
+                  }
+
                   // Emit tripwire chunk and return bail response
                   if (pubsub) {
                     await emitChunkEvent(pubsub, runId, {
@@ -1646,8 +1673,9 @@ export function createDurableLLMExecutionStep(_options?: DurableLLMExecutionStep
                       from: ChunkFrom.AGENT,
                       payload: {
                         reason: error.message,
-                        processorId: error.processorId,
+                        retry: error.options?.retry,
                         metadata: error.options?.metadata,
+                        processorId: error.processorId,
                       },
                     });
                   }
@@ -1662,7 +1690,7 @@ export function createDurableLLMExecutionStep(_options?: DurableLLMExecutionStep
                     },
                     metadata: { modelId: currentModel.modelId },
                     state: typedInput.state,
-                  };
+                  } satisfies DurableLLMStepOutput;
                 }
                 throw error;
               }

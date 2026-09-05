@@ -903,6 +903,18 @@ export class MastraModelOutput<OUTPUT = undefined> extends MastraBase {
                 processorId: chunk.payload?.processorId,
               };
               self.#finishReason = 'other';
+
+              // Durable agents emit their final finish chunk (with the tripwire
+              // recorded on the stepResult) after this chunk, so keep the stream
+              // open and let the finish chunk do the normal closing. Terminating
+              // here would kill the public stream before finish ever arrives.
+              if (self.#options?.isDurableStream) {
+                // Emit the tripwire chunk for listeners and pass it through
+                self.#emitChunk(chunk);
+                controller.enqueue(chunk);
+                return;
+              }
+
               // Mark stream as finished for EventEmitter
               self.#streamFinished = true;
 
